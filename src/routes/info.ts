@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db/pool.js";
+import { estimateFee } from "../fee/estimate.js";
 
 const MAX_LEAF_PAGE = 10000;
 const DEFAULT_LEAF_PAGE = 1000;
@@ -11,6 +12,11 @@ interface LeafRow {
 }
 
 export async function infoRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/v1/info/fee", async () => {
+    const quote = await estimateFee();
+    return { asset: "XLM", ...quote };
+  });
+
   app.get("/v1/info/pools", async () => {
     const { rows } = await db.query(
       `select address, token, asset, denomination, generation, active
