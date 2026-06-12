@@ -104,6 +104,85 @@ export async function poolExists(address: string): Promise<boolean> {
   return rowCount !== null && rowCount > 0;
 }
 
+export interface DueJob {
+  id: string;
+  pool: string;
+  proof: string;
+  root: string;
+  nullifierHash: string;
+  amountHash: string;
+  recipient: string;
+  xlmFee: string;
+}
+
+// Atomically claims up to `limit` jobs whose delay has elapsed, flipping them to executing so a
+// concurrent worker cannot grab the same row.
+export async function claimDueJobs(limit: number): Promise<DueJob[]> {
+  const { rows } = await db.query<DueJobRow>(
+    `update reveal_jobs set status = 'executing', updated_at = now()
+     where id in (
+       select id from reveal_jobs
+       where status = 'queued' and scheduled_for <= now()
+       order by scheduled_for
+       limit $1
+       for update skip locked
+     )
+     returning id, pool, proof, root, nullifier_hash, amount_hash, recipient, relayer_fee`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    pool: r.pool,
+    proof: r.proof,
+    root: r.root,
+    nullifierHash: r.nullifier_hash,
+    amountHash: r.amount_hash,
+    recipient: r.recipient,
+    xlmFee: r.relayer_fee,
+  }));
+}
+
+// txHash is null when the reveal was already on-chain (a spent nullifier), so the relayer confirms
+// the outcome without having submitted the transaction itself.
+export async function markConfirmed(id: string, txHash: string | null): Promise<void> {
+  await db.query(
+    "update reveal_jobs set status = 'confirmed', tx_hash = $2, updated_at = now() where id = $1",
+    [id, txHash],
+  );
+}
+
+// A reveal the simulation refused (bad proof, fee below gas) is terminal: the locked proof and fee
+// will not become valid on retry.
+export async function markRejected(id: string, reason: string): Promise<void> {
+  await db.query(
+    "update reveal_jobs set status = 'failed', failure_reason = $2, updated_at = now() where id = $1",
+    [id, reason],
+  );
+}
+
+// A transient error (RPC, timeout, on-chain failure mid-flight) is retried with exponential backoff
+// until REVEAL_MAX_ATTEMPTS, then dead-lettered.
+export async function markForRetry(id: string, maxAttempts: number): Promise<void> {
+  await db.query(
+    `update reveal_jobs set
+       attempts = attempts + 1,
+       status = (case when attempts + 1 >= $2 then 'dead' else 'queued' end)::job_status,
+       scheduled_for = now() + (least(power(2, attempts)::int, 60) || ' minutes')::interval,
+       failure_reason = case when attempts + 1 >= $2 then 'max_attempts' else failure_reason end,
+       updated_at = now()
+     where id = $1`,
+    [id, maxAttempts],
+  );
+}
+
+// On startup, jobs left in executing by a crash mid-flight are returned to the queue.
+export async function requeueStuck(): Promise<number> {
+  const { rowCount } = await db.query(
+    "update reveal_jobs set status = 'queued', updated_at = now() where status = 'executing'",
+  );
+  return rowCount ?? 0;
+}
+
 interface UpsertRow {
   id: string;
   status: string;
@@ -120,4 +199,15 @@ interface StatusRow {
   attempts: number;
   scheduled_for: string;
   created_at: string;
+}
+
+interface DueJobRow {
+  id: string;
+  pool: string;
+  proof: string;
+  root: string;
+  nullifier_hash: string;
+  amount_hash: string;
+  recipient: string;
+  relayer_fee: string;
 }
