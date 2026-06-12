@@ -8,9 +8,10 @@ import {
   xdr,
   rpc,
 } from "@stellar/stellar-sdk";
-import { server, horizon, relayerKeypair } from "../stellar/rpc.js";
+import { server, horizon } from "../stellar/rpc.js";
 import { withMasterSequence } from "../stellar/master.js";
 import { recordEphemeral, forgetEphemeral, mergeEphemeral } from "./ephemerals.js";
+import type { Channel } from "../channels/pool.js";
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
 
@@ -33,6 +34,9 @@ export interface RevealJob {
   nullifierHash: string;
   amountHash: string;
   recipient: string;
+  // The master whose key the client bound into the proof as the fee recipient. The channel handling
+  // this job belongs to this master, so the reveal pays the fee to it and it fee-bumps the gas.
+  relayer: string;
   xlmFee: string;
 }
 
@@ -42,16 +46,17 @@ export type RevealResult =
 
 // Runs the full reveal for one job on one channel: sponsor a throwaway ephemeral (so the relayer's
 // wallet is never the reveal source), simulate to verify the proof and price the gas, restore any
-// archived pool state, submit the reveal fee-bumped by the master, then merge the ephemeral back so
-// its sponsored reserve returns to the channel. Simulation is the economic gate: an invalid proof
-// fails it (no gas spent) and a fee below the simulated gas is refused before anything is submitted.
-export async function executeReveal(job: RevealJob, channel: Keypair): Promise<RevealResult> {
+// archived pool state, submit the reveal fee-bumped by the channel's master, then merge the ephemeral
+// back so its sponsored reserve returns to the channel. Simulation is the economic gate: an invalid
+// proof fails it (no gas spent) and a fee below the simulated gas is refused before anything runs.
+export async function executeReveal(job: RevealJob, channel: Channel): Promise<RevealResult> {
+  const master = channel.master;
   const revealOp = buildRevealOp(job);
 
   // Simulate before creating anything. The reveal operation does not depend on the transaction
   // source, so simulating from the master account is equivalent, and it lets an invalid proof or a
   // fee below gas be rejected without spending a sponsor and merge on a throwaway ephemeral.
-  const sim = await simulateReveal(relayerKeypair.publicKey(), revealOp);
+  const sim = await simulateReveal(master.publicKey(), revealOp);
   if (rpc.Api.isSimulationError(sim)) {
     // A spent nullifier means this note was already revealed (by us on a lost-confirmation retry,
     // or by the user self-revealing): the recipient was paid, so it is a success, not a rejection.
@@ -70,25 +75,25 @@ export async function executeReveal(job: RevealJob, channel: Keypair): Promise<R
   // Restore archived pool state first. It is master-sourced and needs no ephemeral, so a restore
   // failure never wastes a sponsor or merge.
   if (rpc.Api.isSimulationRestore(sim)) {
-    await restoreFootprint(sim.restorePreamble);
+    await restoreFootprint(master, sim.restorePreamble);
   }
 
   const ephemeral = Keypair.random();
   // Persist before sponsoring so a crash between sponsor and merge cannot strand the reserve: the
   // sweep finds the record and merges it back.
-  await recordEphemeral(ephemeral, channel.publicKey(), job.id);
+  await recordEphemeral(ephemeral, channel.keypair.publicKey(), job.id);
   try {
-    await sponsorEphemeral(channel, ephemeral);
-    const txHash = await submitReveal(ephemeral, revealOp);
+    await sponsorEphemeral(channel.keypair, ephemeral);
+    const txHash = await submitReveal(master, ephemeral, revealOp);
     return { ok: true, txHash, observedFee: Number(sim.minResourceFee) };
   } finally {
     // Recover the sponsored reserve and drop the record. On failure the record stays so the sweep
     // reclaims it later; the reserve is never permanently leaked.
-    await mergeEphemeral(channel.publicKey(), ephemeral)
+    await mergeEphemeral(channel.keypair.publicKey(), ephemeral, master)
       .then(() => forgetEphemeral(ephemeral.publicKey()))
       .catch((err) =>
         logger.warn(
-          { err, ephemeral: ephemeral.publicKey(), channel: channel.publicKey() },
+          { err, ephemeral: ephemeral.publicKey(), channel: channel.keypair.publicKey() },
           "merge failed, reserve will be reclaimed by sweep",
         ),
       );
@@ -104,7 +109,7 @@ function buildRevealOp(job: RevealJob): xdr.Operation {
     bytes(job.nullifierHash),
     bytes(job.amountHash),
     nativeToScVal(job.recipient, { type: "address" }),
-    nativeToScVal(relayerKeypair.publicKey(), { type: "address" }),
+    nativeToScVal(job.relayer, { type: "address" }),
     nativeToScVal(BigInt(job.xlmFee), { type: "i128" }),
   );
 }
@@ -121,7 +126,11 @@ async function simulateReveal(
   return server.simulateTransaction(tx);
 }
 
-async function submitReveal(ephemeral: Keypair, revealOp: xdr.Operation): Promise<string> {
+async function submitReveal(
+  master: Keypair,
+  ephemeral: Keypair,
+  revealOp: xdr.Operation,
+): Promise<string> {
   const account = await server.getAccount(ephemeral.publicKey());
   const base = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NET })
     .addOperation(revealOp)
@@ -133,13 +142,8 @@ async function submitReveal(ephemeral: Keypair, revealOp: xdr.Operation): Promis
   // The fee bump must bid at least the inner reveal's fee, which is dominated by the BN254
   // verification resource fee, plus headroom for the bump's own inclusion.
   const bumpFee = (BigInt(prepared.fee) + BigInt(FEE_BUMP_REVEAL)).toString();
-  const feeBump = TransactionBuilder.buildFeeBumpTransaction(
-    relayerKeypair,
-    bumpFee,
-    prepared,
-    NET,
-  );
-  feeBump.sign(relayerKeypair);
+  const feeBump = TransactionBuilder.buildFeeBumpTransaction(master, bumpFee, prepared, NET);
+  feeBump.sign(master);
   // Submit through Horizon: the Soroban RPC's getTransaction cannot parse a fee-bump result and
   // throws, even though the reveal itself succeeds.
   const result = await horizon.submitTransaction(feeBump);
@@ -148,18 +152,18 @@ async function submitReveal(ephemeral: Keypair, revealOp: xdr.Operation): Promis
 
 type RestorePreamble = rpc.Api.SimulateTransactionRestoreResponse["restorePreamble"];
 
-async function restoreFootprint(preamble: RestorePreamble): Promise<void> {
+async function restoreFootprint(master: Keypair, preamble: RestorePreamble): Promise<void> {
   // Restores run from inside parallel reveals and consume the master's sequence, so they are
-  // serialized with each other and with the maintenance loop's master-sourced submissions.
-  await withMasterSequence(async () => {
-    const master = await server.getAccount(relayerKeypair.publicKey());
+  // serialized per master with each other and with the maintenance loop's master-sourced submissions.
+  await withMasterSequence(master.publicKey(), async () => {
+    const account = await server.getAccount(master.publicKey());
     const fee = (BigInt(BASE_FEE) + BigInt(preamble.minResourceFee)).toString();
-    const tx = new TransactionBuilder(master, { fee, networkPassphrase: NET })
+    const tx = new TransactionBuilder(account, { fee, networkPassphrase: NET })
       .setSorobanData(preamble.transactionData.build())
       .addOperation(Operation.restoreFootprint({}))
       .setTimeout(60)
       .build();
-    tx.sign(relayerKeypair);
+    tx.sign(master);
     // Submit through Horizon: the Soroban RPC's getTransaction cannot parse this result and throws.
     await horizon.submitTransaction(tx);
   });

@@ -1,4 +1,5 @@
-import { channelPool } from "../channels/pool.js";
+import { channelPool, type Channel } from "../channels/pool.js";
+import { relayerKeypairs } from "../stellar/rpc.js";
 import { executeReveal } from "./execute.js";
 import {
   claimDueJobs,
@@ -12,7 +13,16 @@ import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
 
 async function processJob(job: DueJob): Promise<void> {
-  const channel = await channelPool.acquire();
+  let channel: Channel;
+  try {
+    channel = await channelPool.acquire(job.relayer);
+  } catch {
+    // The job's relayer is not one of our masters (e.g. config changed after it was scheduled), so
+    // it can never be routed. Terminal, not a retry.
+    await markRejected(job.id, "unknown_relayer");
+    logger.warn({ job: job.id, relayer: job.relayer }, "no channel for relayer master");
+    return;
+  }
   try {
     const result = await executeReveal(job, channel);
     if (result.ok) {
@@ -34,8 +44,9 @@ async function processJob(job: DueJob): Promise<void> {
 }
 
 async function cycle(): Promise<void> {
-  // Claim at most one job per channel; acquire() would block unboundedly if jobs exceeded channels.
-  const jobs = await claimDueJobs(config.CHANNEL_COUNT);
+  // Claim at most one job per channel across all masters; acquire() blocks if a master's channels
+  // are all busy, so over-claiming would stall.
+  const jobs = await claimDueJobs(config.CHANNEL_COUNT * relayerKeypairs.length);
   if (jobs.length === 0) {
     return;
   }

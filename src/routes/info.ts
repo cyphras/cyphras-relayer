@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db/pool.js";
 import { estimateFee } from "../fee/estimate.js";
+import { channelPool } from "../channels/pool.js";
 
 const MAX_LEAF_PAGE = 10000;
 const DEFAULT_LEAF_PAGE = 1000;
@@ -14,7 +15,10 @@ interface LeafRow {
 export async function infoRoutes(app: FastifyInstance): Promise<void> {
   app.get("/v1/info/fee", async () => {
     const quote = await estimateFee();
-    return { asset: "XLM", ...quote };
+    // Advertise master wallets with free-channel counts so a client routes to the least-busy one and
+    // binds its key into the proof as the fee recipient.
+    const relayers = channelPool.freeCounts().sort((a, b) => b.freeChannels - a.freeChannels);
+    return { asset: "XLM", ...quote, relayer: relayers[0].publicKey, relayers };
   });
 
   app.get("/v1/info/pools", async () => {

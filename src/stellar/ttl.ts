@@ -58,7 +58,7 @@ export async function codeLiveUntil(wasmHash: Buffer): Promise<number | null> {
 // (a relative amount, capped by the network max entry TTL). Raising only, so it is safe to repeat;
 // paid from the relayer wallet and serialized on the master sequence.
 async function extendTtl(key: xdr.LedgerKey, extendLedgers: number, label: string): Promise<void> {
-  await withMasterSequence(async () => {
+  await withMasterSequence(relayerKeypair.publicKey(), async () => {
     const sorobanData = new SorobanDataBuilder().setReadOnly([key]).build();
     const account = await server.getAccount(relayerKeypair.publicKey());
     const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NET })

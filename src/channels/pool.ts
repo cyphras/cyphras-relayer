@@ -1,55 +1,100 @@
 import { Keypair, Operation, TransactionBuilder, Asset, BASE_FEE, xdr } from "@stellar/stellar-sdk";
-import { horizon, relayerKeypair } from "../stellar/rpc.js";
+import { horizon, relayerKeypairs } from "../stellar/rpc.js";
 import { withMasterSequence } from "../stellar/master.js";
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
 import { deriveChannels } from "./derive.js";
 
-// Each channel is the source of the create-ephemeral transaction for one in-flight reveal. Because
-// every channel has its own sequence number, reveals run in parallel instead of serializing on the
-// master account. The master only fee-bumps and tops channels up, neither of which consumes its
-// sequence on the hot path.
+// A channel sources the create-ephemeral transaction for one in-flight reveal and is tied to the
+// master that funds it. Each channel has its own sequence, so reveals run in parallel; the master
+// only fee-bumps and tops up, neither of which consumes its sequence on the hot path.
+export interface Channel {
+  keypair: Keypair;
+  master: Keypair;
+}
+
+interface MasterPool {
+  master: Keypair;
+  channels: Channel[];
+  free: Channel[];
+  waiters: Array<(channel: Channel) => void>;
+}
+
+// One channel pool per master. A reveal is routed to the master whose key the client bound into the
+// proof as the fee recipient, so channels are acquired by master rather than from a single set.
 export class ChannelPool {
-  private readonly channels: Keypair[];
-  private readonly free: Keypair[];
-  private readonly waiters: Array<(channel: Keypair) => void> = [];
+  private readonly pools = new Map<string, MasterPool>();
 
   constructor() {
-    this.channels = deriveChannels(relayerKeypair, config.CHANNEL_COUNT);
-    this.free = [...this.channels];
+    for (const master of relayerKeypairs) {
+      const channels = deriveChannels(master, config.CHANNEL_COUNT).map((keypair) => ({
+        keypair,
+        master,
+      }));
+      this.pools.set(master.publicKey(), { master, channels, free: [...channels], waiters: [] });
+    }
   }
 
-  // Provisions any missing channel and tops up any whose spendable balance fell below the threshold.
-  // Idempotent, so it is safe to run on every boot.
   async ensureFunded(): Promise<void> {
-    for (const channel of this.channels) {
-      const state = await channelState(channel.publicKey());
-      if (!state.exists) {
-        await createChannel(channel);
-        logger.info({ channel: channel.publicKey() }, "channel created");
-      } else if (state.spendable < BigInt(config.CHANNEL_MIN_BALANCE_STROOPS)) {
-        await topUpChannel(channel, state.spendable);
-        logger.info({ channel: channel.publicKey() }, "channel topped up");
+    let total = 0;
+    for (const mp of this.pools.values()) {
+      for (const channel of mp.channels) {
+        const state = await channelState(channel.keypair.publicKey());
+        if (!state.exists) {
+          await createChannel(channel);
+          logger.info({ channel: channel.keypair.publicKey() }, "channel created");
+        } else if (state.spendable < BigInt(config.CHANNEL_MIN_BALANCE_STROOPS)) {
+          await topUpChannel(channel, state.spendable);
+          logger.info({ channel: channel.keypair.publicKey() }, "channel topped up");
+        }
+        total += 1;
       }
     }
-    logger.info({ count: this.channels.length }, "channels ready");
+    logger.info({ count: total, masters: this.pools.size }, "channels ready");
   }
 
-  acquire(): Promise<Keypair> {
-    const channel = this.free.pop();
+  acquire(masterPublicKey: string): Promise<Channel> {
+    const mp = this.pools.get(masterPublicKey);
+    if (!mp) {
+      return Promise.reject(new Error(`unknown relayer master ${masterPublicKey}`));
+    }
+    const channel = mp.free.pop();
     if (channel) {
       return Promise.resolve(channel);
     }
-    return new Promise((resolve) => this.waiters.push(resolve));
+    return new Promise((resolve) => mp.waiters.push(resolve));
   }
 
-  release(channel: Keypair): void {
-    const waiter = this.waiters.shift();
+  release(channel: Channel): void {
+    const mp = this.pools.get(channel.master.publicKey());
+    if (!mp) {
+      return;
+    }
+    const waiter = mp.waiters.shift();
     if (waiter) {
       waiter(channel);
     } else {
-      this.free.push(channel);
+      mp.free.push(channel);
     }
+  }
+
+  // The sweep needs the funding master to fee-bump an orphaned ephemeral's merge with the right wallet.
+  masterForChannel(channelPublicKey: string): Keypair | undefined {
+    for (const mp of this.pools.values()) {
+      const match = mp.channels.find((c) => c.keypair.publicKey() === channelPublicKey);
+      if (match) {
+        return match.master;
+      }
+    }
+    return undefined;
+  }
+
+  // The fee endpoint advertises this so clients route to the least-busy wallet.
+  freeCounts(): Array<{ publicKey: string; freeChannels: number }> {
+    return [...this.pools.values()].map((mp) => ({
+      publicKey: mp.master.publicKey(),
+      freeChannels: mp.free.length,
+    }));
   }
 }
 
@@ -84,41 +129,43 @@ async function channelState(pubkey: string): Promise<{ exists: boolean; spendabl
 // Channel funding is a classic-only transaction, submitted through Horizon rather than the Soroban
 // RPC, which is the path for non-contract operations. A fresh account starts with the fund target
 // plus the two base reserves it locks, so its spendable balance opens at the full target.
-async function createChannel(channel: Keypair): Promise<void> {
+async function createChannel(channel: Channel): Promise<void> {
   const starting = BigInt(config.CHANNEL_FUND_STROOPS) + 2n * BASE_RESERVE_STROOPS;
   await submitFromMaster(
+    channel.master,
     Operation.createAccount({
-      destination: channel.publicKey(),
+      destination: channel.keypair.publicKey(),
       startingBalance: stroopsToXlm(starting),
     }),
   );
 }
 
-async function topUpChannel(channel: Keypair, spendable: bigint): Promise<void> {
+async function topUpChannel(channel: Channel, spendable: bigint): Promise<void> {
   const amount = BigInt(config.CHANNEL_FUND_STROOPS) - spendable;
   if (amount <= 0n) {
     return;
   }
   await submitFromMaster(
+    channel.master,
     Operation.payment({
-      destination: channel.publicKey(),
+      destination: channel.keypair.publicKey(),
       asset: Asset.native(),
       amount: stroopsToXlm(amount),
     }),
   );
 }
 
-async function submitFromMaster(operation: xdr.Operation): Promise<void> {
-  await withMasterSequence(async () => {
-    const master = await horizon.loadAccount(relayerKeypair.publicKey());
-    const tx = new TransactionBuilder(master, {
+async function submitFromMaster(master: Keypair, operation: xdr.Operation): Promise<void> {
+  await withMasterSequence(master.publicKey(), async () => {
+    const account = await horizon.loadAccount(master.publicKey());
+    const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: config.STELLAR_NETWORK_PASSPHRASE,
     })
       .addOperation(operation)
       .setTimeout(60)
       .build();
-    tx.sign(relayerKeypair);
+    tx.sign(master);
     await horizon.submitTransaction(tx);
   });
 }

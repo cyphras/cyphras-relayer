@@ -1,4 +1,4 @@
-import { server, readContract, relayerXlmBalance } from "../stellar/rpc.js";
+import { server, readContract, relayerKeypairs, xlmBalanceOf } from "../stellar/rpc.js";
 import {
   instanceLiveUntil,
   extendInstanceTtl,
@@ -61,9 +61,14 @@ async function keeper(): Promise<void> {
 // Tops up any channel that drained during operation and warns when the master wallet runs low.
 async function monitor(): Promise<void> {
   await channelPool.ensureFunded();
-  const balance = await relayerXlmBalance();
-  if (balance !== null && stroops(balance) < BigInt(config.MASTER_MIN_BALANCE_STROOPS)) {
-    await alert("relayer master balance below threshold, top up the wallet", { balance });
+  for (const master of relayerKeypairs) {
+    const balance = await xlmBalanceOf(master.publicKey());
+    if (balance !== null && stroops(balance) < BigInt(config.MASTER_MIN_BALANCE_STROOPS)) {
+      await alert("relayer master balance below threshold, top up the wallet", {
+        master: master.publicKey(),
+        balance,
+      });
+    }
   }
 }
 
