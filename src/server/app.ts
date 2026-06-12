@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyError } from "fastify";
 import rateLimit from "@fastify/rate-limit";
+import cors from "@fastify/cors";
 import { healthRoutes } from "../routes/health.js";
 import { infoRoutes } from "../routes/info.js";
 import { relayRoutes } from "../routes/relay.js";
@@ -17,6 +18,13 @@ export async function buildApp(): Promise<FastifyInstance> {
     // Only honor X-Forwarded-For when explicitly deployed behind a known number of proxy hops, so
     // the rate limit keys on the real client IP without letting a direct client spoof the header.
     trustProxy: config.TRUST_PROXY_HOPS > 0 ? config.TRUST_PROXY_HOPS : false,
+  });
+
+  // Allow the configured browser origins (e.g. a wallet extension) to call the API cross-origin.
+  const origins = config.ALLOWED_ORIGINS.split(",").map((o) => o.trim());
+  await app.register(cors, {
+    origin: origins.includes("*") ? "*" : origins,
+    methods: ["GET", "POST"],
   });
 
   // Rate-limit per client to keep proof submissions and status polls from exhausting RPC and DB.
