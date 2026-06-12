@@ -55,7 +55,9 @@ const schema = z
     // Comma-separated web origins allowed to call the API from a browser (e.g. a wallet extension).
     // "*" allows any origin, which is fine for this credential-less public API.
     ALLOWED_ORIGINS: z.string().default("*"),
-    ALERT_WEBHOOK_URL: z.string().url().optional(),
+    // An unset env var arrives as "" here, not undefined, so treat empty as absent before the
+    // url check; otherwise a blank ALERT_WEBHOOK_URL would fail validation and crash startup.
+    ALERT_WEBHOOK_URL: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
   })
   .refine((c) => c.CHANNEL_MIN_BALANCE_STROOPS < c.CHANNEL_FUND_STROOPS, {
