@@ -52,6 +52,9 @@ const schema = z
     // limit keys on the real client IP instead of the proxy's. Left at 0, the proxy is not trusted
     // (correct for a direct bind); never set a bare "true" with an untrusted X-Forwarded-For.
     TRUST_PROXY_HOPS: z.coerce.number().int().nonnegative().default(0),
+    // Comma-separated web origins allowed to call the API from a browser (e.g. a wallet extension).
+    // "*" allows any origin, which is fine for this credential-less public API.
+    ALLOWED_ORIGINS: z.string().default("*"),
     ALERT_WEBHOOK_URL: z.string().url().optional(),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
   })
