@@ -1,5 +1,6 @@
 import { Keypair, Operation, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
 import { horizon, relayerKeypair } from "../stellar/rpc.js";
+import { channelPool } from "../channels/pool.js";
 import { config } from "../config/index.js";
 import { db } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
@@ -34,7 +35,11 @@ export async function forgetEphemeral(pubkey: string): Promise<void> {
 // Merges the ephemeral back into its channel, returning the sponsored reserve. The master fee-bumps
 // because the ephemeral has no balance. The channel is referenced by public key only (the merge
 // destination), so no channel signature is needed and the sweep can run from a stored record.
-export async function mergeEphemeral(channel: string, ephemeral: Keypair): Promise<void> {
+export async function mergeEphemeral(
+  channel: string,
+  ephemeral: Keypair,
+  master: Keypair,
+): Promise<void> {
   const account = await horizon.loadAccount(ephemeral.publicKey());
   const inner = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NET })
     .addOperation(Operation.accountMerge({ destination: channel }))
@@ -42,13 +47,8 @@ export async function mergeEphemeral(channel: string, ephemeral: Keypair): Promi
     .build();
   inner.sign(ephemeral);
 
-  const feeBump = TransactionBuilder.buildFeeBumpTransaction(
-    relayerKeypair,
-    FEE_BUMP_MERGE,
-    inner,
-    NET,
-  );
-  feeBump.sign(relayerKeypair);
+  const feeBump = TransactionBuilder.buildFeeBumpTransaction(master, FEE_BUMP_MERGE, inner, NET);
+  feeBump.sign(master);
   await horizon.submitTransaction(feeBump);
 }
 
@@ -62,7 +62,8 @@ export async function sweepEphemerals(): Promise<number> {
   let reclaimed = 0;
   for (const row of rows) {
     try {
-      await mergeEphemeral(row.channel, Keypair.fromSecret(row.secret));
+      const master = channelPool.masterForChannel(row.channel) ?? relayerKeypair;
+      await mergeEphemeral(row.channel, Keypair.fromSecret(row.secret), master);
       await forgetEphemeral(row.pubkey);
       reclaimed += 1;
     } catch (err) {

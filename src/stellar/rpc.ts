@@ -14,11 +14,29 @@ export const server = new rpc.Server(config.STELLAR_RPC_URL);
 
 export const horizon = new Horizon.Server(config.STELLAR_HORIZON_URL);
 
-export const relayerKeypair = Keypair.fromSecret(config.RELAYER_SECRET);
+// All master wallets. The first is the primary, used wherever a single master suffices (TTL keeper,
+// contract reads, the default relayer when a client does not pick one). Each master funds its own
+// channels and receives the fees of reveals bound to its public key.
+export const relayerKeypairs: Keypair[] = [
+  Keypair.fromSecret(config.RELAYER_SECRET),
+  ...config.RELAYER_EXTRA_SECRETS.map((s) => Keypair.fromSecret(s)),
+];
 
-export async function relayerXlmBalance(): Promise<string | null> {
-  const account = await horizon.loadAccount(relayerKeypair.publicKey());
+export const relayerKeypair = relayerKeypairs[0];
+
+// Master keypair for a given public key, or undefined if it is not one of ours. Used to route a
+// reveal to the wallet whose key the client bound into the proof as the fee recipient.
+export function masterFor(publicKey: string): Keypair | undefined {
+  return relayerKeypairs.find((k) => k.publicKey() === publicKey);
+}
+
+export async function xlmBalanceOf(publicKey: string): Promise<string | null> {
+  const account = await horizon.loadAccount(publicKey);
   return account.balances.find((b) => b.asset_type === "native")?.balance ?? null;
+}
+
+export function relayerXlmBalance(): Promise<string | null> {
+  return xlmBalanceOf(relayerKeypair.publicKey());
 }
 
 /**

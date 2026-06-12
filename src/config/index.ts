@@ -9,6 +9,21 @@ const schema = z
     STELLAR_HORIZON_URL: z.string().url(),
     STELLAR_NETWORK_PASSPHRASE: z.string().min(1),
     RELAYER_SECRET: z.string().length(56),
+    // Optional additional master secrets (comma-separated), each funding its own channels. Clients
+    // pick which master receives the fee by binding its public key into the proof; the relayer
+    // routes each reveal to the matching master. Empty means a single master (RELAYER_SECRET).
+    RELAYER_EXTRA_SECRETS: z
+      .string()
+      .default("")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter((x) => x.length > 0),
+      )
+      .refine((arr) => arr.every((x) => x.length === 56), {
+        message: "each RELAYER_EXTRA_SECRETS entry must be a 56-char Stellar secret",
+      }),
     FACTORY_ID: z.string().length(56),
     INDEXER_START_LEDGER: z.coerce.number().int().nonnegative().default(0),
     INDEXER_MAX_WINDOW: z.coerce.number().int().positive().default(100000),

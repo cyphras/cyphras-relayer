@@ -18,6 +18,7 @@ export interface ScheduleParams {
   nullifierHash: string;
   amountHash: string;
   recipient: string;
+  relayer: string;
   xlmFee: string;
   privacyLevel: PrivacyLevel;
 }
@@ -41,9 +42,9 @@ export async function scheduleJob(params: ScheduleParams): Promise<ScheduledJob>
   const delay = delaySeconds(params.privacyLevel);
   const { rows } = await db.query<UpsertRow>(
     `insert into reveal_jobs
-       (pool, proof, root, nullifier_hash, amount_hash, recipient, relayer_fee, privacy_level,
-        scheduled_for)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, now() + ($9 || ' seconds')::interval)
+       (pool, proof, root, nullifier_hash, amount_hash, recipient, relayer, relayer_fee,
+        privacy_level, scheduled_for)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + ($10 || ' seconds')::interval)
      on conflict (nullifier_hash) do update set nullifier_hash = excluded.nullifier_hash
      returning id, status, scheduled_for, (xmax = 0) as inserted`,
     [
@@ -53,6 +54,7 @@ export async function scheduleJob(params: ScheduleParams): Promise<ScheduledJob>
       params.nullifierHash,
       params.amountHash,
       params.recipient,
+      params.relayer,
       params.xlmFee,
       params.privacyLevel,
       delay,
@@ -112,6 +114,7 @@ export interface DueJob {
   nullifierHash: string;
   amountHash: string;
   recipient: string;
+  relayer: string;
   xlmFee: string;
 }
 
@@ -127,7 +130,7 @@ export async function claimDueJobs(limit: number): Promise<DueJob[]> {
        limit $1
        for update skip locked
      )
-     returning id, pool, proof, root, nullifier_hash, amount_hash, recipient, relayer_fee`,
+     returning id, pool, proof, root, nullifier_hash, amount_hash, recipient, relayer, relayer_fee`,
     [limit],
   );
   return rows.map((r) => ({
@@ -138,6 +141,7 @@ export async function claimDueJobs(limit: number): Promise<DueJob[]> {
     nullifierHash: r.nullifier_hash,
     amountHash: r.amount_hash,
     recipient: r.recipient,
+    relayer: r.relayer,
     xlmFee: r.relayer_fee,
   }));
 }
@@ -243,5 +247,6 @@ interface DueJobRow {
   nullifier_hash: string;
   amount_hash: string;
   recipient: string;
+  relayer: string;
   relayer_fee: string;
 }

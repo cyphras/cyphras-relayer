@@ -1,10 +1,12 @@
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { config } from "../config/index.js";
-import { readContract } from "../stellar/rpc.js";
+import { readContract, server } from "../stellar/rpc.js";
 import { db } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
+import { isPoolCreatedEvent, parsePoolCreatedEvent } from "../stellar/events.js";
 
 const POOL_PAGE = 100;
+const EVENT_PAGE_LIMIT = 100;
 
 interface PoolInfo {
   token: string;
@@ -43,6 +45,8 @@ export async function syncPools(): Promise<void> {
     );
   }
 
+  await seedCreatedLedgers();
+
   // A pool the factory no longer lists is retired: stop indexing and keepering it. Its already
   // indexed leaves stay queryable, so notes still held in it remain revealable. Skip deactivation
   // when the factory returned no pools at all: that is a fresh/empty factory or a transient read,
@@ -55,6 +59,39 @@ export async function syncPools(): Promise<void> {
   }
 
   logger.info({ count: pools.length }, "pools synced");
+}
+
+// Records each pool's creation ledger so the leaf indexer can seed its cursor independent of the
+// RPC sliding window. The null-guarded UPDATE makes this write-once.
+async function seedCreatedLedgers(): Promise<void> {
+  const start = config.INDEXER_START_LEDGER;
+  let cursor: string | undefined;
+
+  for (;;) {
+    const res = await server.getEvents({
+      startLedger: cursor ? undefined : start,
+      cursor,
+      filters: [{ type: "contract", contractIds: [config.FACTORY_ID] }],
+      limit: EVENT_PAGE_LIMIT,
+    });
+
+    for (const event of res.events) {
+      try {
+        if (!isPoolCreatedEvent(event)) continue;
+        const created = parsePoolCreatedEvent(event);
+        await db.query(
+          "update pools set created_ledger = $2 where address = $1 and created_ledger is null",
+          [created.pool, created.ledger],
+        );
+      } catch (err) {
+        logger.error({ err, ledger: event.ledger }, "skipping unparseable pool_created event");
+      }
+    }
+
+    const cursorLedger = Number(BigInt(res.cursor.split("-")[0]) >> 32n);
+    if (cursorLedger >= res.latestLedger) break;
+    cursor = res.cursor;
+  }
 }
 
 export async function activePools(): Promise<string[]> {

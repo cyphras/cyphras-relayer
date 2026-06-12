@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { scheduleJob, getJob, poolExists, type PrivacyLevel } from "../relay/jobs.js";
+import { relayerKeypair, masterFor } from "../stellar/rpc.js";
 
 const HEX = (n: number) => `^[0-9a-fA-F]{${n}}$`;
 const STELLAR_CONTRACT = "^C[A-Z2-7]{55}$";
@@ -24,6 +25,7 @@ interface ScheduleBody {
   nullifierHash: string;
   amountHash: string;
   recipient: string;
+  relayer?: string;
   xlmFee: string;
   privacyLevel?: PrivacyLevel;
 }
@@ -40,6 +42,7 @@ const scheduleSchema = {
       nullifierHash: { type: "string", pattern: HEX(64) },
       amountHash: { type: "string", pattern: HEX(64) },
       recipient: { type: "string", pattern: STELLAR_ADDRESS },
+      relayer: { type: "string", pattern: STELLAR_ADDRESS },
       xlmFee: { type: "string", pattern: "^[0-9]+$", maxLength: 20 },
       privacyLevel: { type: "string", enum: ["fast", "standard", "maximum"] },
     },
@@ -73,6 +76,14 @@ export async function relayRoutes(app: FastifyInstance): Promise<void> {
         return { error: "unknown pool" };
       }
 
+      // Default to the primary master when omitted; reject any relayer that isn't one of ours, since
+      // we cannot fee-bump as a key we don't hold.
+      const relayer = body.relayer ?? relayerKeypair.publicKey();
+      if (!masterFor(relayer)) {
+        reply.code(400);
+        return { error: "unknown relayer" };
+      }
+
       // Lowercase hex so a case variant of the same nullifier cannot slip past the unique-nullifier dedup.
       const job = await scheduleJob({
         pool: body.pool,
@@ -81,6 +92,7 @@ export async function relayRoutes(app: FastifyInstance): Promise<void> {
         nullifierHash: body.nullifierHash.toLowerCase(),
         amountHash: body.amountHash.toLowerCase(),
         recipient: body.recipient,
+        relayer,
         xlmFee: body.xlmFee,
         privacyLevel: body.privacyLevel ?? "standard",
       });

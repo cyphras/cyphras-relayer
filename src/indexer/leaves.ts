@@ -15,7 +15,15 @@ async function storedCursor(pool: string): Promise<number> {
     "select last_ledger from indexer_cursor where pool = $1",
     [pool],
   );
-  return rows[0]?.last_ledger ?? config.INDEXER_START_LEDGER;
+  if (rows[0]) return rows[0].last_ledger;
+
+  // No cursor yet: anchor to this pool's own creation ledger, not a shared global start, so history
+  // begins when the pool existed.
+  const { rows: poolRows } = await db.query<{ created_ledger: number | null }>(
+    "select created_ledger from pools where address = $1",
+    [pool],
+  );
+  return poolRows[0]?.created_ledger ?? config.INDEXER_START_LEDGER;
 }
 
 async function setCursor(pool: string, ledger: number): Promise<void> {
