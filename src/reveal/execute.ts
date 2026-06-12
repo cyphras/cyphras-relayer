@@ -9,16 +9,24 @@ import {
   rpc,
 } from "@stellar/stellar-sdk";
 import { server, horizon, relayerKeypair } from "../stellar/rpc.js";
-import { submitAndWait } from "../stellar/submit.js";
+import { withMasterSequence } from "../stellar/master.js";
+import { recordEphemeral, forgetEphemeral, mergeEphemeral } from "./ephemerals.js";
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
 
 const NET = config.STELLAR_NETWORK_PASSPHRASE;
+
+// The pool panics with this exact message when a nullifier is already spent. It is the only signal
+// that distinguishes an already-revealed note (a success: the recipient was paid) from a genuine
+// rejection, so it is a deliberate coupling to the contract: keep it in sync with the pool's panic.
+const NULLIFIER_SPENT_PANIC = "nullifier already used";
+
 const FEE_BUMP_REVEAL = String(parseInt(BASE_FEE, 10) * 100);
 const FEE_BUMP_MERGE = String(parseInt(BASE_FEE, 10) * 10);
 const FEE_SPONSOR = String(parseInt(BASE_FEE, 10) * 3);
 
 export interface RevealJob {
+  id: string;
   pool: string;
   proof: string;
   root: string;
@@ -28,7 +36,9 @@ export interface RevealJob {
   xlmFee: string;
 }
 
-export type RevealResult = { ok: true; txHash: string } | { ok: false; reason: string };
+export type RevealResult =
+  | { ok: true; txHash: string; observedFee: number }
+  | { ok: false; reason: string };
 
 // Runs the full reveal for one job on one channel: sponsor a throwaway ephemeral (so the relayer's
 // wallet is never the reveal source), simulate to verify the proof and price the gas, restore any
@@ -45,7 +55,7 @@ export async function executeReveal(job: RevealJob, channel: Keypair): Promise<R
   if (rpc.Api.isSimulationError(sim)) {
     // A spent nullifier means this note was already revealed (by us on a lost-confirmation retry,
     // or by the user self-revealing): the recipient was paid, so it is a success, not a rejection.
-    return sim.error.includes("nullifier already used")
+    return sim.error.includes(NULLIFIER_SPENT_PANIC)
       ? { ok: false, reason: "already_revealed" }
       : { ok: false, reason: "rejected_by_simulation" };
   }
@@ -64,19 +74,24 @@ export async function executeReveal(job: RevealJob, channel: Keypair): Promise<R
   }
 
   const ephemeral = Keypair.random();
+  // Persist before sponsoring so a crash between sponsor and merge cannot strand the reserve: the
+  // sweep finds the record and merges it back.
+  await recordEphemeral(ephemeral, channel.publicKey(), job.id);
   try {
     await sponsorEphemeral(channel, ephemeral);
     const txHash = await submitReveal(ephemeral, revealOp);
-    return { ok: true, txHash };
+    return { ok: true, txHash, observedFee: Number(sim.minResourceFee) };
   } finally {
-    // Recover the sponsored reserve. Best-effort, but a failure leaks the reserve on the channel,
-    // so log it: the ephemeral still exists and can be merged back later.
-    await mergeEphemeral(channel, ephemeral).catch((err) =>
-      logger.warn(
-        { err, ephemeral: ephemeral.publicKey(), channel: channel.publicKey() },
-        "merge failed, sponsored reserve leaked",
-      ),
-    );
+    // Recover the sponsored reserve and drop the record. On failure the record stays so the sweep
+    // reclaims it later; the reserve is never permanently leaked.
+    await mergeEphemeral(channel.publicKey(), ephemeral)
+      .then(() => forgetEphemeral(ephemeral.publicKey()))
+      .catch((err) =>
+        logger.warn(
+          { err, ephemeral: ephemeral.publicKey(), channel: channel.publicKey() },
+          "merge failed, reserve will be reclaimed by sweep",
+        ),
+      );
   }
 }
 
@@ -134,15 +149,20 @@ async function submitReveal(ephemeral: Keypair, revealOp: xdr.Operation): Promis
 type RestorePreamble = rpc.Api.SimulateTransactionRestoreResponse["restorePreamble"];
 
 async function restoreFootprint(preamble: RestorePreamble): Promise<void> {
-  const master = await server.getAccount(relayerKeypair.publicKey());
-  const fee = (BigInt(BASE_FEE) + BigInt(preamble.minResourceFee)).toString();
-  const tx = new TransactionBuilder(master, { fee, networkPassphrase: NET })
-    .setSorobanData(preamble.transactionData.build())
-    .addOperation(Operation.restoreFootprint({}))
-    .setTimeout(60)
-    .build();
-  tx.sign(relayerKeypair);
-  await submitAndWait(tx);
+  // Restores run from inside parallel reveals and consume the master's sequence, so they are
+  // serialized with each other and with the maintenance loop's master-sourced submissions.
+  await withMasterSequence(async () => {
+    const master = await server.getAccount(relayerKeypair.publicKey());
+    const fee = (BigInt(BASE_FEE) + BigInt(preamble.minResourceFee)).toString();
+    const tx = new TransactionBuilder(master, { fee, networkPassphrase: NET })
+      .setSorobanData(preamble.transactionData.build())
+      .addOperation(Operation.restoreFootprint({}))
+      .setTimeout(60)
+      .build();
+    tx.sign(relayerKeypair);
+    // Submit through Horizon: the Soroban RPC's getTransaction cannot parse this result and throws.
+    await horizon.submitTransaction(tx);
+  });
 }
 
 // The channel is both the source and the sponsor, so its sequence (not the master's) is consumed,
@@ -159,24 +179,4 @@ async function sponsorEphemeral(channel: Keypair, ephemeral: Keypair): Promise<v
     .build();
   tx.sign(channel, ephemeral);
   await horizon.submitTransaction(tx);
-}
-
-// The ephemeral holds no balance, so the master fee-bumps the merge. Merging to the channel returns
-// the sponsored reserve to it.
-async function mergeEphemeral(channel: Keypair, ephemeral: Keypair): Promise<void> {
-  const account = await horizon.loadAccount(ephemeral.publicKey());
-  const inner = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NET })
-    .addOperation(Operation.accountMerge({ destination: channel.publicKey() }))
-    .setTimeout(60)
-    .build();
-  inner.sign(ephemeral);
-
-  const feeBump = TransactionBuilder.buildFeeBumpTransaction(
-    relayerKeypair,
-    FEE_BUMP_MERGE,
-    inner,
-    NET,
-  );
-  feeBump.sign(relayerKeypair);
-  await horizon.submitTransaction(feeBump);
 }

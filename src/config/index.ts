@@ -18,11 +18,26 @@ const schema = z
     CHANNEL_COUNT: z.coerce.number().int().positive().default(8),
     CHANNEL_FUND_STROOPS: z.coerce.number().int().positive().default(30000000),
     CHANNEL_MIN_BALANCE_STROOPS: z.coerce.number().int().positive().default(20000000),
+    MAINTENANCE_INTERVAL_MS: z.coerce.number().int().positive().default(300000),
+    KEEPER_EXTEND_LEDGERS: z.coerce.number().int().positive().default(500000),
+    KEEPER_THRESHOLD_LEDGERS: z.coerce.number().int().positive().default(100000),
+    MASTER_MIN_BALANCE_STROOPS: z.coerce.number().int().positive().default(500000000),
     REVEAL_FLOW_FEE_STROOPS: z.coerce.number().int().positive().default(120000),
     FEE_MARGIN_BPS: z.coerce.number().int().nonnegative().default(2000),
     FEE_TIER_STROOPS: z.coerce.number().int().positive().default(100000),
     FEE_FALLBACK_INCLUSION_STROOPS: z.coerce.number().int().nonnegative().default(200),
     FEE_QUOTE_TTL_SECONDS: z.coerce.number().int().positive().default(120),
+    FEE_SAMPLE_SIZE: z.coerce.number().int().positive().default(50),
+    JOB_RETENTION_HOURS: z.coerce.number().int().positive().default(168),
+    RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+    RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),
+    BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(16384),
+    REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+    // Set to the number of trusted proxy hops when deployed behind a reverse proxy, so the rate
+    // limit keys on the real client IP instead of the proxy's. Left at 0, the proxy is not trusted
+    // (correct for a direct bind); never set a bare "true" with an untrusted X-Forwarded-For.
+    TRUST_PROXY_HOPS: z.coerce.number().int().nonnegative().default(0),
+    ALERT_WEBHOOK_URL: z.string().url().optional(),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
   })
   .refine((c) => c.CHANNEL_MIN_BALANCE_STROOPS < c.CHANNEL_FUND_STROOPS, {

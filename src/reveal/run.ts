@@ -16,7 +16,7 @@ async function processJob(job: DueJob): Promise<void> {
   try {
     const result = await executeReveal(job, channel);
     if (result.ok) {
-      await markConfirmed(job.id, result.txHash);
+      await markConfirmed(job.id, result.txHash, result.observedFee);
       logger.info({ job: job.id, tx: result.txHash }, "reveal confirmed");
     } else if (result.reason === "already_revealed") {
       await markConfirmed(job.id, null);

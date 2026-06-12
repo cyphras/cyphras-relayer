@@ -1,6 +1,7 @@
 import { server } from "../stellar/rpc.js";
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
+import { recentObservedRevealFee } from "../relay/jobs.js";
 
 export interface FeeQuote {
   feeStroops: string;
@@ -29,7 +30,8 @@ export async function estimateFee(): Promise<FeeQuote> {
 // Returns the cost observed from recent reveals, or null when none has been recorded yet; callers
 // fall back to the configured baseline.
 async function observedRevealFee(): Promise<number | null> {
-  return null;
+  const avg = await recentObservedRevealFee(config.FEE_SAMPLE_SIZE);
+  return avg === null ? null : Math.ceil(avg);
 }
 
 async function currentInclusionFee(): Promise<number> {

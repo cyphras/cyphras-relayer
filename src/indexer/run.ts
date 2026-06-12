@@ -1,8 +1,9 @@
 import { server } from "../stellar/rpc.js";
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
+import { alert } from "../lib/alert.js";
 import { syncPools, activePools } from "./pools.js";
-import { indexPool } from "./leaves.js";
+import { indexPool, LeafIntegrityError } from "./leaves.js";
 
 async function cycle(): Promise<void> {
   await syncPools();
@@ -14,7 +15,14 @@ async function cycle(): Promise<void> {
         logger.info({ pool, indexed }, "indexed commit events");
       }
     } catch (err) {
-      logger.error({ err, pool }, "indexing failed for pool");
+      if (err instanceof LeafIntegrityError) {
+        await alert("indexer leaf integrity failure, tree is incomplete", {
+          pool,
+          reason: err.message,
+        });
+      } else {
+        logger.error({ err, pool }, "indexing failed for pool");
+      }
     }
   }
 }

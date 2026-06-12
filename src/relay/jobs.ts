@@ -143,12 +143,46 @@ export async function claimDueJobs(limit: number): Promise<DueJob[]> {
 }
 
 // txHash is null when the reveal was already on-chain (a spent nullifier), so the relayer confirms
-// the outcome without having submitted the transaction itself.
-export async function markConfirmed(id: string, txHash: string | null): Promise<void> {
+// the outcome without having submitted the transaction itself. observedFee is the resource fee this
+// reveal actually cost, recorded to drive future fee quotes; it is absent on the already-on-chain path.
+export async function markConfirmed(
+  id: string,
+  txHash: string | null,
+  observedFee?: number,
+): Promise<void> {
   await db.query(
-    "update reveal_jobs set status = 'confirmed', tx_hash = $2, updated_at = now() where id = $1",
-    [id, txHash],
+    `update reveal_jobs set status = 'confirmed', tx_hash = $2, observed_fee = $3, updated_at = now()
+     where id = $1`,
+    [id, txHash, observedFee ?? null],
   );
+}
+
+// Reveal resource cost is nearly constant, so an average of recent confirmed reveals is the best
+// fee-quote input. Null until one is recorded.
+export async function recentObservedRevealFee(sampleSize: number): Promise<number | null> {
+  const { rows } = await db.query<{ avg: number | null }>(
+    `select avg(observed_fee)::float8 as avg from (
+       select observed_fee from reveal_jobs
+       where status = 'confirmed' and observed_fee is not null
+       order by updated_at desc limit $1
+     ) recent`,
+    [sampleSize],
+  );
+  return rows[0]?.avg ?? null;
+}
+
+// Privacy hygiene: a terminal job's recipient, proof, and timing link a deposit to its withdrawal.
+// Past the retention window none of it is needed, so the row is deleted. Replay protection does not
+// depend on this row; the pool's on-chain nullifier check at reveal is the authority, so any
+// resubmission is judged on-chain.
+export async function purgeTerminalJobs(retentionHours: number): Promise<number> {
+  const { rowCount } = await db.query(
+    `delete from reveal_jobs
+     where status in ('confirmed', 'failed', 'dead')
+       and updated_at < now() - ($1 || ' hours')::interval`,
+    [retentionHours],
+  );
+  return rowCount ?? 0;
 }
 
 // A reveal the simulation refused (bad proof, fee below gas) is terminal: the locked proof and fee
