@@ -1,9 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { db } from "../db/pool.js";
 import { server, relayerKeypair, relayerXlmBalance } from "../stellar/rpc.js";
+import { config } from "../config/index.js";
 
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/v1/health", async (_req, reply) => {
+  // Liveness probes poll frequently, so this route runs a higher limit than the global one rather
+  // than no limit, which would leave its DB + RPC + Horizon fan-out as an unauthenticated DoS surface.
+  const rateLimit = { max: config.RATE_LIMIT_MAX * 5, timeWindow: config.RATE_LIMIT_WINDOW_MS };
+  app.get("/v1/health", { config: { rateLimit } }, async (_req, reply) => {
     const checks = { db: false, rpc: false, relayer: false };
     let xlmBalance: string | null = null;
 

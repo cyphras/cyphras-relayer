@@ -6,6 +6,17 @@ const STELLAR_CONTRACT = "^C[A-Z2-7]{55}$";
 const STELLAR_ADDRESS = "^[GC][A-Z2-7]{55}$";
 const UUID = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
+// BN254 scalar field modulus. Public inputs are field elements, so the contract reduces them mod r.
+// A value at or above r is a non-canonical encoding of a smaller element: rejecting it stops the
+// same nullifier from being resubmitted in an alternate 32-byte form that slips past dedup.
+const FIELD_MODULUS = BigInt(
+  "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+);
+
+function isCanonicalField(hex: string): boolean {
+  return BigInt("0x" + hex) < FIELD_MODULUS;
+}
+
 interface ScheduleBody {
   pool: string;
   proof: string;
@@ -49,17 +60,26 @@ export async function relayRoutes(app: FastifyInstance): Promise<void> {
     { schema: scheduleSchema },
     async (req, reply) => {
       const body = req.body;
+      if (
+        !isCanonicalField(body.root) ||
+        !isCanonicalField(body.nullifierHash) ||
+        !isCanonicalField(body.amountHash)
+      ) {
+        reply.code(400);
+        return { error: "non-canonical field element" };
+      }
       if (!(await poolExists(body.pool))) {
         reply.code(404);
         return { error: "unknown pool" };
       }
 
+      // Lowercase hex so a case variant of the same nullifier cannot slip past the unique-nullifier dedup.
       const job = await scheduleJob({
         pool: body.pool,
-        proof: body.proof,
-        root: body.root,
-        nullifierHash: body.nullifierHash,
-        amountHash: body.amountHash,
+        proof: body.proof.toLowerCase(),
+        root: body.root.toLowerCase(),
+        nullifierHash: body.nullifierHash.toLowerCase(),
+        amountHash: body.amountHash.toLowerCase(),
         recipient: body.recipient,
         xlmFee: body.xlmFee,
         privacyLevel: body.privacyLevel ?? "standard",
