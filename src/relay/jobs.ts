@@ -35,38 +35,70 @@ function delaySeconds(level: PrivacyLevel): number {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-// Idempotent on nullifier_hash. ON CONFLICT DO UPDATE (a no-op write) returns the row whether it
-// was inserted or already existed and blocks on a concurrent insert of the same note, so a single
-// round-trip is race-free with no missing-row window. xmax = 0 marks a fresh insert.
+// Keyed on nullifier_hash (unique). A brand-new note inserts a queued job. A repeat schedule for a
+// note whose job has terminally failed or gone dead (exhausted its retry budget) re-arms it with the
+// new proof/recipient and re-queues it - this is how a sender retries delivery or recovers a stuck
+// deposit to their own account (the recipient is a reveal-time input, not bound in the commitment).
+// A job that is queued, executing, or already confirmed is left untouched: its nullifier is in flight
+// or spent, so re-revealing would be wasteful or impossible.
 export async function scheduleJob(params: ScheduleParams): Promise<ScheduledJob> {
   const delay = delaySeconds(params.privacyLevel);
+  const values = [
+    params.pool,
+    params.proof,
+    params.root,
+    params.nullifierHash,
+    params.amountHash,
+    params.recipient,
+    params.relayer,
+    params.xlmFee,
+    params.privacyLevel,
+    delay,
+  ];
   const { rows } = await db.query<UpsertRow>(
     `insert into reveal_jobs
        (pool, proof, root, nullifier_hash, amount_hash, recipient, relayer, relayer_fee,
         privacy_level, scheduled_for)
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + ($10 || ' seconds')::interval)
-     on conflict (nullifier_hash) do update set nullifier_hash = excluded.nullifier_hash
+     on conflict (nullifier_hash) do update set
+       proof = excluded.proof,
+       root = excluded.root,
+       amount_hash = excluded.amount_hash,
+       recipient = excluded.recipient,
+       relayer = excluded.relayer,
+       relayer_fee = excluded.relayer_fee,
+       privacy_level = excluded.privacy_level,
+       scheduled_for = excluded.scheduled_for,
+       status = 'queued',
+       attempts = 0,
+       failure_reason = null,
+       updated_at = now()
+     where reveal_jobs.status in ('failed', 'dead')
      returning id, status, scheduled_for, (xmax = 0) as inserted`,
-    [
-      params.pool,
-      params.proof,
-      params.root,
-      params.nullifierHash,
-      params.amountHash,
-      params.recipient,
-      params.relayer,
-      params.xlmFee,
-      params.privacyLevel,
-      delay,
-    ],
+    values,
   );
 
-  const row = rows[0];
+  if (rows[0]) {
+    return {
+      id: rows[0].id,
+      status: rows[0].status,
+      scheduledFor: rows[0].scheduled_for,
+      idempotent: !rows[0].inserted,
+    };
+  }
+
+  // Conflict on a job that is queued, executing, or confirmed: the DO UPDATE WHERE filtered it out,
+  // so return the existing job unchanged rather than disturbing an in-flight or completed reveal.
+  const existing = await db.query<{ id: string; status: string; scheduled_for: string }>(
+    `select id, status, scheduled_for from reveal_jobs where nullifier_hash = $1`,
+    [params.nullifierHash],
+  );
+  const row = existing.rows[0];
   return {
     id: row.id,
     status: row.status,
     scheduledFor: row.scheduled_for,
-    idempotent: !row.inserted,
+    idempotent: true,
   };
 }
 
