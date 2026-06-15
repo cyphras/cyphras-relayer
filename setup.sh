@@ -75,6 +75,13 @@ info "Writing nginx config for $DOMAIN..."
 
 cat > /etc/nginx/conf.d/cyphras-relayer-limits.conf <<'EOF'
 limit_req_zone $binary_remote_addr zone=relayer_api:10m rate=5r/s;
+
+# Route relayer calls by the network the client declares. No header (preflight, curl, older clients)
+# falls through to testnet; the mainnet upstream is reached only once that stack is running.
+map $http_x_cyphras_network $relayer_upstream {
+    default  127.0.0.1:8080;
+    mainnet  127.0.0.1:8081;
+}
 EOF
 
 cat > "/etc/nginx/sites-available/$DOMAIN" <<EOF
@@ -87,10 +94,10 @@ server {
     add_header Referrer-Policy            no-referrer  always;
     add_header Strict-Transport-Security  "max-age=31536000; includeSubDomains" always;
 
-    # Public relayer API: /v1/info, /v1/relay, /v1/health
+    # Public relayer API: /v1/info, /v1/relay, /v1/health. Upstream is chosen by the network header.
     location /v1/ {
         limit_req  zone=relayer_api burst=20 nodelay;
-        proxy_pass        http://127.0.0.1:8080;
+        proxy_pass        http://\$relayer_upstream;
         proxy_set_header  Host               \$host;
         proxy_set_header  X-Real-IP          \$remote_addr;
         # Overwrite, never append, so a direct client cannot forge an upstream hop to dodge
@@ -144,4 +151,8 @@ echo "  Update  : cd $APP_DIR && git pull && docker compose up -d --build"
 echo ""
 echo "  Next: fund the relayer master wallet (and any RELAYER_EXTRA_SECRETS),"
 echo "        then point your client at https://$DOMAIN"
+echo ""
+echo "  Mainnet: once MAINNET_FACTORY_ID is set in .env, start the parallel stack with"
+echo "           docker compose -f docker-compose.mainnet.yml up -d"
+echo "           Same domain; nginx routes it by the X-Cyphras-Network: mainnet header."
 echo ""
