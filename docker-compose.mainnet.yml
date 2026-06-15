@@ -1,0 +1,49 @@
+# Mainnet relayer, run beside the testnet stack on the same host and SAME .env:
+#   docker compose -f docker-compose.mainnet.yml up -d
+# Shares the .env secrets/tuning, overrides only the network vars below; own DB, port 8081, reached via
+# the "X-Cyphras-Network: mainnet" header. Start once MAINNET_FACTORY_ID is set.
+services:
+  postgres-mainnet:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relayer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: relayer_mainnet
+    volumes:
+      - pgdata-mainnet:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relayer"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  relayer-mainnet:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      STELLAR_RPC_URL: https://mainnet.sorobanrpc.com
+      STELLAR_HORIZON_URL: https://horizon.stellar.org
+      STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+      FACTORY_ID: ${MAINNET_FACTORY_ID:?set MAINNET_FACTORY_ID in .env}
+      INDEXER_START_LEDGER: ${MAINNET_INDEXER_START_LEDGER:-0}
+      DATABASE_URL: postgres://relayer:${POSTGRES_PASSWORD}@postgres-mainnet:5432/relayer_mainnet
+    ports:
+      # Separate port from testnet's 8080; nginx routes the mainnet header here.
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      postgres-mainnet:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata-mainnet:

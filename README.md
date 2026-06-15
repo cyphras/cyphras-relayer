@@ -16,12 +16,12 @@ docker compose up
 ```
 
 This starts PostgreSQL and the relayer, runs migrations on boot, and serves the API on
-`http://localhost:8080`.
+`http://127.0.0.1:8080`.
 
 Health check:
 
 ```
-curl http://localhost:8080/v1/health
+curl http://127.0.0.1:8080/v1/health
 ```
 
 ## Layout
