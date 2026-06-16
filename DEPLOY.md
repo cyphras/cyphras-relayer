@@ -71,7 +71,9 @@ docker compose restart relayer      # restart
 git pull && docker compose up -d --build   # update
 ```
 
-Backups and operations details are in [docs/operations.md](docs/operations.md).
+Back up Postgres off-host with `scripts/backup.sh` from cron - it holds reveal jobs, merge state,
+the leaf cursor, and ephemeral-channel secrets that cannot be re-derived from chain. Backup, restore,
+key custody, rotation, and balance monitoring are in [docs/operations.md](docs/operations.md).
 
 ## Serving mainnet alongside testnet
 

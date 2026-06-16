@@ -1,4 +1,5 @@
 import { db } from "../db/pool.js";
+import { alert } from "../lib/alert.js";
 
 export type PrivacyLevel = "fast" | "standard" | "maximum";
 
@@ -233,16 +234,26 @@ export async function markRejected(id: string, reason: string): Promise<void> {
 // A transient error (RPC, timeout, on-chain failure mid-flight) is retried with exponential backoff
 // until REVEAL_MAX_ATTEMPTS, then dead-lettered.
 export async function markForRetry(id: string, maxAttempts: number): Promise<void> {
-  await db.query(
+  const { rows } = await db.query<{ status: string; attempts: number }>(
     `update reveal_jobs set
        attempts = attempts + 1,
        status = (case when attempts + 1 >= $2 then 'dead' else 'queued' end)::job_status,
        scheduled_for = now() + (least(power(2, attempts)::int, 60) || ' minutes')::interval,
        failure_reason = case when attempts + 1 >= $2 then 'max_attempts' else failure_reason end,
        updated_at = now()
-     where id = $1`,
+     where id = $1
+     returning status, attempts`,
     [id, maxAttempts],
   );
+  if (rows[0]?.status === "dead") {
+    await alert(
+      "reveal job dead-lettered after max attempts; recipient unpaid until the owner self-reclaims",
+      {
+        job: id,
+        attempts: rows[0].attempts,
+      },
+    );
+  }
 }
 
 // On startup, jobs left in executing by a crash mid-flight are returned to the queue.

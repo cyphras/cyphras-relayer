@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { scheduleJob, getJob, poolExists, type PrivacyLevel } from "../relay/jobs.js";
 import { relayerKeypair, masterFor } from "../stellar/rpc.js";
+import { config } from "../config/index.js";
 
 const HEX = (n: number) => `^[0-9a-fA-F]{${n}}$`;
 const STELLAR_CONTRACT = "^C[A-Z2-7]{55}$";
@@ -60,7 +61,15 @@ const statusSchema = {
 export async function relayRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: ScheduleBody }>(
     "/v1/relay/schedule",
-    { schema: scheduleSchema },
+    {
+      schema: scheduleSchema,
+      config: {
+        rateLimit: {
+          max: config.SCHEDULE_RATE_LIMIT_MAX,
+          timeWindow: config.RATE_LIMIT_WINDOW_MS,
+        },
+      },
+    },
     async (req, reply) => {
       const body = req.body;
       if (

@@ -39,7 +39,10 @@ async function keeper(): Promise<void> {
         wasmHashes.set(hash.toString("hex"), hash);
       }
     } catch (err) {
-      logger.error({ err, contract }, "ttl extend failed");
+      await alert("contract TTL maintenance failed, it may drift toward archival", {
+        contract,
+        reason: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -53,7 +56,10 @@ async function keeper(): Promise<void> {
         logger.info({ wasm: hex.slice(0, 8) }, "code ttl extended");
       }
     } catch (err) {
-      logger.error({ err, wasm: hex.slice(0, 8) }, "code ttl extend failed");
+      await alert("contract code TTL maintenance failed, it may drift toward archival", {
+        wasm: hex.slice(0, 8),
+        reason: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

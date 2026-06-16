@@ -11,6 +11,7 @@ import {
 } from "../relay/jobs.js";
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
+import { beat } from "../lib/heartbeat.js";
 
 async function processJob(job: DueJob): Promise<void> {
   let channel: Channel;
@@ -67,6 +68,7 @@ export async function startExecutor(): Promise<void> {
     running = true;
     try {
       await cycle();
+      beat("executor");
     } catch (err) {
       logger.error({ err }, "executor cycle failed");
     } finally {
