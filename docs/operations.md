@@ -151,3 +151,55 @@ This is the fund-safety escape hatch: because the self-reveal path depends on
 nothing the relayer controls, a depositor can always reclaim their full deposit
 directly from the pool if the relayer is unavailable, censoring, or overpricing
 reveals.
+
+## Backups and restore
+
+Postgres holds state that is not re-derivable from chain: reveal jobs, merge state, the leaf
+indexer cursor, and ephemeral-channel secrets. Losing the database volume without a backup
+permanently strands in-flight reveals and the XLM held in ephemeral channels, so the database is
+the one piece of durable state that must be backed up off-host.
+
+### Taking backups
+
+`scripts/backup.sh` dumps every running database (testnet `relayer`, and mainnet `relayer_mainnet`
+when that stack is up), gzips each with a UTC timestamp, prunes local copies older than
+`BACKUP_RETENTION_DAYS` (default 14), and - when `BACKUP_REMOTE` is set - copies them off-host with
+rclone. Run it from cron and ship the output off the host:
+
+```bash
+# rclone config   # once, to configure the remote
+echo '0 * * * * BACKUP_REMOTE=s3:cyphras-relayer-backups /opt/cyphras-relayer/scripts/backup.sh >> /var/log/cyphras-backup.log 2>&1' | crontab -
+```
+
+A backup that never leaves the VPS does not protect against disk or host loss: set `BACKUP_REMOTE`
+(or copy `/opt/cyphras-relayer-backups` off-host another way).
+
+### Restoring
+
+1. Stop the relayer so nothing writes mid-restore (leave Postgres running):
+
+   ```bash
+   docker compose stop relayer
+   ```
+
+2. Restore the dump (it drops and recreates objects, so it works over the migrated schema). Testnet:
+
+   ```bash
+   gunzip -c relayer-<stamp>.sql.gz | docker compose exec -T postgres psql -U relayer -d relayer
+   ```
+
+   For mainnet, use `docker-compose.mainnet.yml`, service `postgres-mainnet`, database
+   `relayer_mainnet`.
+
+3. Start the relayer again:
+
+   ```bash
+   docker compose up -d relayer
+   ```
+
+   On boot, migrations are idempotent and `requeueStuck` returns any reveal left `executing` by the
+   outage to the queue, so delivery resumes from the restored state.
+
+Restore priority after a total loss: the leaf cursor and ephemeral secrets first (withdrawals and
+held funds depend on them), then jobs. A reveal whose job row is lost is still recoverable by the
+note owner via self-reclaim, so job loss degrades service but never loses funds.

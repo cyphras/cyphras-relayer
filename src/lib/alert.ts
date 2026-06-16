@@ -10,10 +10,22 @@ export async function alert(message: string, context: Record<string, unknown>): 
     return;
   }
   try {
+    // text (Slack) and content (Discord) let a raw incoming-webhook URL render the alert directly;
+    // service/message/context stay for generic endpoints and reshaping relays (PagerDuty, n8n, etc.).
+    const keys = Object.keys(context);
+    const summary = keys.length
+      ? `[cyphras-relayer] ${message} | ${keys.map((k) => `${k}=${String(context[k])}`).join(" ")}`
+      : `[cyphras-relayer] ${message}`;
     await fetch(config.ALERT_WEBHOOK_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ service: "cyphras-relayer", message, ...context }),
+      body: JSON.stringify({
+        service: "cyphras-relayer",
+        message,
+        ...context,
+        text: summary,
+        content: summary,
+      }),
     });
   } catch (err) {
     logger.warn({ err }, "alert webhook delivery failed");

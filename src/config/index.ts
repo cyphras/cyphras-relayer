@@ -27,6 +27,9 @@ const schema = z
     FACTORY_ID: z.string().length(56),
     INDEXER_START_LEDGER: z.coerce.number().int().nonnegative().default(0),
     INDEXER_MAX_WINDOW: z.coerce.number().int().positive().default(100000),
+    // Alert when the leaf indexer falls this far behind the latest ledger; stale leaves serve a stale
+    // root from /v1/info/leaves and break withdrawals. An initial backfill can briefly exceed this.
+    INDEXER_LAG_ALERT_LEDGERS: z.coerce.number().int().positive().default(200),
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     EXECUTOR_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(10000),
     REVEAL_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
@@ -45,6 +48,9 @@ const schema = z
     FEE_SAMPLE_SIZE: z.coerce.number().int().positive().default(50),
     JOB_RETENTION_HOURS: z.coerce.number().int().positive().default(168),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+    // Tighter cap for the expensive schedule endpoint (queues a reveal the relayer later pays to
+    // submit). A multi-note send fires several in a burst, so it sits above a single send's count.
+    SCHEDULE_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),
     BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(16384),
     REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),

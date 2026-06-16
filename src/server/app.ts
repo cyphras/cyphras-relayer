@@ -28,6 +28,9 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   // Rate-limit per client to keep proof submissions and status polls from exhausting RPC and DB.
+  // In-memory per-IP store, which is correct for the single-process-per-network topology (testnet and
+  // mainnet are separate processes limiting their own traffic). Running multiple replicas of one
+  // network behind a load balancer would need a shared store (a redis option on this plugin).
   await app.register(rateLimit, {
     max: config.RATE_LIMIT_MAX,
     timeWindow: config.RATE_LIMIT_WINDOW_MS,
