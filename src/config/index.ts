@@ -72,6 +72,10 @@ const schema = z
   .refine((c) => c.CHANNEL_MIN_BALANCE_STROOPS < c.CHANNEL_FUND_STROOPS, {
     message:
       "CHANNEL_MIN_BALANCE_STROOPS must be below CHANNEL_FUND_STROOPS so top-ups raise the balance",
+  })
+  .refine((c) => c.KEEPER_EXTEND_LEDGERS > c.KEEPER_THRESHOLD_LEDGERS, {
+    message:
+      "KEEPER_EXTEND_LEDGERS must exceed KEEPER_THRESHOLD_LEDGERS so each extend clears the threshold instead of re-running every cycle",
   });
 
 export type Config = z.infer<typeof schema>;

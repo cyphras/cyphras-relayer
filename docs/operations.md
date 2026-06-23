@@ -115,20 +115,25 @@ storage, so a single bump per contract keeps that working set live. Extending th
 code entry avoids a restore on the first call to a contract that has sat idle past
 its code entry's TTL.
 
-### Persistent storage is restore-on-demand, not proactively extended
+### Persistent storage: bounded state is kept live, unbounded is restore-on-demand
 
-The pool's persistent storage, specifically its root history and its
-spent-nullifier set, is intentionally NOT extended by the keeper. Under Protocol
-23, persistent entries are archived, never deleted: an expired persistent entry
-can always be restored. The reveal path handles this automatically. When
-simulation reports an archived footprint, `executeReveal()` in
-`src/reveal/execute.ts` submits a `RestoreFootprint` (master-sourced) before
-submitting the reveal, so any archived pool state is brought back on demand.
+The keeper proactively extends the bounded persistent state the contracts depend on
+for liveness: the factory registry (`PoolList`), so pools stay discoverable and
+rotatable, and each pool's latest root state (`RootHistory` and the matching
+`KnownRoot`), so a held note stays revealable even after the pool sits idle past a
+persistent entry's TTL. Both contracts are written expecting this off-chain keeper
+(see the comments in the pool and factory `lib.rs`). `keepPersistentState()` in
+`src/maintenance/run.ts` harvests the exact ledger keys from each read's
+host-computed footprint and extends them on the same `liveUntilLedgerSeq` vs
+`KEEPER_THRESHOLD_LEDGERS` rule as the instance keeper.
 
-Persistent storage is not kept proactively live because it is unbounded: the
-spent-nullifier set grows with every reveal, so keeping it live would cost
-indefinitely. It is allowed to archive and is restored only when a reveal touches
-it.
+The unbounded persistent state is left to archive and restored on demand: the
+spent-nullifier set (`NullifierUsed`) grows with every reveal, and older historical
+roots accumulate with every commit, so keeping all of them live would cost
+indefinitely. Under Protocol 23 these are archived, never deleted. When a reveal
+touches an archived entry, `executeReveal()` in `src/reveal/execute.ts` submits a
+master-sourced `RestoreFootprint` before the reveal, so the entry is brought back on
+demand at the cost of one extra transaction.
 
 ## Self-reclaim and zero relayer fee
 

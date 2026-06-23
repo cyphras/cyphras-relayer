@@ -5,7 +5,11 @@ import {
   contractWasmHash,
   codeLiveUntil,
   extendCodeTtl,
+  readWithPersistentKeys,
+  minLiveUntil,
+  extendPersistentTtl,
 } from "../stellar/ttl.js";
+import { xdr } from "@stellar/stellar-sdk";
 import { activePools } from "../indexer/pools.js";
 import { channelPool } from "../channels/pool.js";
 import { sweepEphemerals } from "../reveal/ephemerals.js";
@@ -21,7 +25,8 @@ import { alert } from "../lib/alert.js";
 async function keeper(): Promise<void> {
   const latest = (await server.getLatestLedger()).sequence;
   const verifier = (await readContract(config.FACTORY_ID, "get_verifier")) as string;
-  const contracts = [config.FACTORY_ID, verifier, ...(await activePools())];
+  const pools = await activePools();
+  const contracts = [config.FACTORY_ID, verifier, ...pools];
 
   const wasmHashes = new Map<string, Buffer>();
   for (const contract of contracts) {
@@ -58,6 +63,72 @@ async function keeper(): Promise<void> {
     } catch (err) {
       await alert("contract code TTL maintenance failed, it may drift toward archival", {
         wasm: hex.slice(0, 8),
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  await keepPersistentState(latest, pools);
+}
+
+// Keeps alive the persistent entries the instance keeper does not cover: each pool's latest root
+// state (so long-held notes stay revealable) and the factory registry (so pools stay discoverable).
+// On-chain those get a TTL bump only when written, so an idle pool or a dormant registry drifts
+// toward archival. Only still-live entries are extended: an already-archived entry cannot be
+// extended (only restored), and simulation reads it via an in-sim restore, so trying to extend it
+// is a no-op that would re-fire every cycle. Archived entries are left to the reveal path's
+// restore-on-demand instead.
+async function keepPersistentState(latest: number, pools: string[]): Promise<void> {
+  const targets: { label: string; keys: xdr.LedgerKey[] }[] = [];
+
+  try {
+    const registry = await readWithPersistentKeys(config.FACTORY_ID, "get_pools");
+    targets.push({ label: "factory registry", keys: registry.persistentKeys });
+  } catch (err) {
+    await alert("factory registry TTL discovery failed, it may drift toward archival", {
+      reason: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  for (const pool of pools) {
+    try {
+      const history = await readWithPersistentKeys(pool, "get_last_root");
+      const known = await readWithPersistentKeys(pool, "is_known_root", [
+        xdr.ScVal.scvBytes(Buffer.from(history.value as Uint8Array)),
+      ]);
+      const keys = [...history.persistentKeys, ...known.persistentKeys];
+      if (keys.length === 0) {
+        logger.warn(
+          { pool },
+          "pool root state harvested no persistent keys, contract layout may have changed",
+        );
+      }
+      targets.push({ label: `pool ${pool} root state`, keys });
+    } catch (err) {
+      await alert("pool root-state TTL discovery failed, it may drift toward archival", {
+        pool,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  for (const { label, keys } of targets) {
+    if (keys.length === 0) {
+      continue;
+    }
+    try {
+      const liveUntil = await minLiveUntil(keys);
+      if (
+        liveUntil !== null &&
+        liveUntil > latest &&
+        liveUntil - latest < config.KEEPER_THRESHOLD_LEDGERS
+      ) {
+        await extendPersistentTtl(keys, config.KEEPER_EXTEND_LEDGERS, label);
+        logger.info({ target: label }, "persistent ttl extended");
+      }
+    } catch (err) {
+      await alert("persistent-entry TTL maintenance failed, it may drift toward archival", {
+        target: label,
         reason: err instanceof Error ? err.message : String(err),
       });
     }
