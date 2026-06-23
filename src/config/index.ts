@@ -40,12 +40,15 @@ const schema = z
     KEEPER_EXTEND_LEDGERS: z.coerce.number().int().positive().default(500000),
     KEEPER_THRESHOLD_LEDGERS: z.coerce.number().int().positive().default(100000),
     MASTER_MIN_BALANCE_STROOPS: z.coerce.number().int().positive().default(500000000),
-    REVEAL_FLOW_FEE_STROOPS: z.coerce.number().int().positive().default(120000),
-    FEE_MARGIN_BPS: z.coerce.number().int().nonnegative().default(2000),
+    // Floor for the full reveal-flow cost the quote must cover (stroops); the quote takes
+    // max(observed cost, this) so it never settles below the real gas.
+    REVEAL_FLOW_FEE_STROOPS: z.coerce.number().int().positive().default(200000),
+    FEE_MARGIN_BPS: z.coerce.number().int().nonnegative().default(3000),
     FEE_TIER_STROOPS: z.coerce.number().int().positive().default(100000),
     FEE_FALLBACK_INCLUSION_STROOPS: z.coerce.number().int().nonnegative().default(200),
     FEE_QUOTE_TTL_SECONDS: z.coerce.number().int().positive().default(120),
-    FEE_SAMPLE_SIZE: z.coerce.number().int().positive().default(50),
+    // Recent reveals (confirmed + fee_below_gas rejections) averaged for the observed-cost input.
+    FEE_SAMPLE_SIZE: z.coerce.number().int().positive().default(20),
     JOB_RETENTION_HOURS: z.coerce.number().int().positive().default(168),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
     // Tighter cap for the expensive schedule endpoint (queues a reveal the relayer later pays to

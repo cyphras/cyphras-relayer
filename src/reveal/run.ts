@@ -33,7 +33,7 @@ async function processJob(job: DueJob): Promise<void> {
       await markConfirmed(job.id, null);
       logger.info({ job: job.id }, "reveal already on-chain");
     } else {
-      await markRejected(job.id, result.reason);
+      await markRejected(job.id, result.reason, result.observedFee);
       logger.warn({ job: job.id, reason: result.reason }, "reveal rejected");
     }
   } catch (err) {

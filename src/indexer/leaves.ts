@@ -1,4 +1,4 @@
-import { server } from "../stellar/rpc.js";
+import { server, rpcOldestEventLedger, FLOOR_SAFETY_LEDGERS } from "../stellar/rpc.js";
 import { config } from "../config/index.js";
 import { db } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
@@ -35,27 +35,25 @@ async function setCursor(pool: string, ledger: number): Promise<void> {
 }
 
 export async function indexPool(pool: string, latestLedger: number): Promise<number> {
-  const start = await storedCursor(pool);
+  let start = await storedCursor(pool);
 
-  // getEvents only retains a recent window. INDEXER_MAX_WINDOW is a configured estimate of it, not
-  // the node's true retention, so a cursor past the estimate does not by itself mean the events are
-  // gone. Probe before giving up: if the node still serves from the cursor, the estimate was merely
-  // conservative and we continue normally (no false wedge). If it refuses, the events are genuinely
-  // unfetchable and clamping forward would leave a permanent hole in the tree, so stop loudly.
-  // Recover by restoring the leaves table from a backup, or re-indexing from a ledger still retained.
-  if (start < latestLedger - config.INDEXER_MAX_WINDOW) {
-    try {
-      await server.getEvents({
-        startLedger: start,
-        filters: [{ type: "contract", contractIds: [pool] }],
-        limit: 1,
-      });
-    } catch (err) {
+  const oldest = await rpcOldestEventLedger(pool, latestLedger, config.INDEXER_MAX_WINDOW);
+  if (start < oldest) {
+    const { rows } = await db.query<{ c: number }>(
+      "select count(*)::int as c from leaves where pool = $1",
+      [pool],
+    );
+    if (rows[0].c > 0) {
       throw new LeafIntegrityError(
-        `indexer cursor ${start} for pool ${pool} is before the RPC retention window; leaves were ` +
-          `missed and cannot be backfilled. Restore the leaves table from a backup, then resume (${String(err)}).`,
+        `indexer cursor ${start} for pool ${pool} is before the RPC oldest ledger ${oldest}; leaves ` +
+          `were missed and cannot be backfilled. Restore the leaves table from a backup, then resume.`,
       );
     }
+    logger.warn(
+      { pool, cursor: start, oldest },
+      "no leaves indexed yet; bootstrapping indexer from the RPC's oldest available ledger",
+    );
+    start = oldest + FLOOR_SAFETY_LEDGERS;
   }
   if (start > latestLedger) return 0;
 
@@ -67,12 +65,12 @@ export async function indexPool(pool: string, latestLedger: number): Promise<num
   // held no matching events. Page on the cursor until it reaches the latest ledger; a short or
   // empty page does not mean the scan is finished.
   for (;;) {
-    const res = await server.getEvents({
-      startLedger: cursor ? undefined : start,
-      cursor,
-      filters: [{ type: "contract", contractIds: [pool] }],
-      limit: PAGE_LIMIT,
-    });
+    const filters = [{ type: "contract" as const, contractIds: [pool] }];
+    const res = await server.getEvents(
+      cursor
+        ? { cursor, filters, limit: PAGE_LIMIT }
+        : { startLedger: start, filters, limit: PAGE_LIMIT },
+    );
 
     for (const event of res.events) {
       try {
