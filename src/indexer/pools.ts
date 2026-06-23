@@ -1,6 +1,11 @@
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { config } from "../config/index.js";
-import { readContract, server } from "../stellar/rpc.js";
+import {
+  readContract,
+  server,
+  rpcOldestEventLedger,
+  FLOOR_SAFETY_LEDGERS,
+} from "../stellar/rpc.js";
 import { db } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
 import { isPoolCreatedEvent, parsePoolCreatedEvent } from "../stellar/events.js";
@@ -64,33 +69,44 @@ export async function syncPools(): Promise<void> {
 // Records each pool's creation ledger so the leaf indexer can seed its cursor independent of the
 // RPC sliding window. The null-guarded UPDATE makes this write-once.
 async function seedCreatedLedgers(): Promise<void> {
-  const start = config.INDEXER_START_LEDGER;
-  let cursor: string | undefined;
+  const { rows: pending } = await db.query<{ c: number }>(
+    "select count(*)::int as c from pools where created_ledger is null",
+  );
+  if (pending[0].c === 0) return;
 
-  for (;;) {
-    const res = await server.getEvents({
-      startLedger: cursor ? undefined : start,
-      cursor,
-      filters: [{ type: "contract", contractIds: [config.FACTORY_ID] }],
-      limit: EVENT_PAGE_LIMIT,
-    });
+  try {
+    const latest = (await server.getLatestLedger()).sequence;
+    const oldest = await rpcOldestEventLedger(config.FACTORY_ID, latest, config.INDEXER_MAX_WINDOW);
+    const start = Math.max(config.INDEXER_START_LEDGER, oldest + FLOOR_SAFETY_LEDGERS);
+    let cursor: string | undefined;
 
-    for (const event of res.events) {
-      try {
-        if (!isPoolCreatedEvent(event)) continue;
-        const created = parsePoolCreatedEvent(event);
-        await db.query(
-          "update pools set created_ledger = $2 where address = $1 and created_ledger is null",
-          [created.pool, created.ledger],
-        );
-      } catch (err) {
-        logger.error({ err, ledger: event.ledger }, "skipping unparseable pool_created event");
+    for (;;) {
+      const filters = [{ type: "contract" as const, contractIds: [config.FACTORY_ID] }];
+      const res = await server.getEvents(
+        cursor
+          ? { cursor, filters, limit: EVENT_PAGE_LIMIT }
+          : { startLedger: start, filters, limit: EVENT_PAGE_LIMIT },
+      );
+
+      for (const event of res.events) {
+        try {
+          if (!isPoolCreatedEvent(event)) continue;
+          const created = parsePoolCreatedEvent(event);
+          await db.query(
+            "update pools set created_ledger = $2 where address = $1 and created_ledger is null",
+            [created.pool, created.ledger],
+          );
+        } catch (err) {
+          logger.error({ err, ledger: event.ledger }, "skipping unparseable pool_created event");
+        }
       }
-    }
 
-    const cursorLedger = Number(BigInt(res.cursor.split("-")[0]) >> 32n);
-    if (cursorLedger >= res.latestLedger) break;
-    cursor = res.cursor;
+      const cursorLedger = Number(BigInt(res.cursor.split("-")[0]) >> 32n);
+      if (cursorLedger >= res.latestLedger) break;
+      cursor = res.cursor;
+    }
+  } catch (err) {
+    logger.warn({ err }, "seedCreatedLedgers scan failed; retrying next cycle");
   }
 }
 

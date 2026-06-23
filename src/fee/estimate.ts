@@ -15,7 +15,7 @@ export interface FeeQuote {
 // live so quotes rise with congestion. The result is rounded up to a coarse tier so many users share
 // one fee value, which avoids an on-chain fee fingerprint linking a commit to its reveal.
 export async function estimateFee(): Promise<FeeQuote> {
-  const resource = (await observedRevealFee()) ?? config.REVEAL_FLOW_FEE_STROOPS;
+  const resource = Math.max((await observedRevealFee()) ?? 0, config.REVEAL_FLOW_FEE_STROOPS);
   const inclusion = await currentInclusionFee();
   const withMargin = Math.ceil(((resource + inclusion) * (10000 + config.FEE_MARGIN_BPS)) / 10000);
   const tier = config.FEE_TIER_STROOPS;

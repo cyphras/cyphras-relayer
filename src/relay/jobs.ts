@@ -194,13 +194,14 @@ export async function markConfirmed(
   );
 }
 
-// Reveal resource cost is nearly constant, so an average of recent confirmed reveals is the best
-// fee-quote input. Null until one is recorded.
+// Average full reveal-flow cost observed on recent reveals, both confirmed ones and fee_below_gas
+// rejections (which record the cost they needed). Including rejections lets the quote rise to meet a
+// risen cost instead of staying stuck below it. Null until one is recorded.
 export async function recentObservedRevealFee(sampleSize: number): Promise<number | null> {
   const { rows } = await db.query<{ avg: number | null }>(
     `select avg(observed_fee)::float8 as avg from (
        select observed_fee from reveal_jobs
-       where status = 'confirmed' and observed_fee is not null
+       where observed_fee is not null
        order by updated_at desc limit $1
      ) recent`,
     [sampleSize],
@@ -224,10 +225,16 @@ export async function purgeTerminalJobs(retentionHours: number): Promise<number>
 
 // A reveal the simulation refused (bad proof, fee below gas) is terminal: the locked proof and fee
 // will not become valid on retry.
-export async function markRejected(id: string, reason: string): Promise<void> {
+export async function markRejected(
+  id: string,
+  reason: string,
+  observedFee?: number,
+): Promise<void> {
   await db.query(
-    "update reveal_jobs set status = 'failed', failure_reason = $2, updated_at = now() where id = $1",
-    [id, reason],
+    `update reveal_jobs set status = 'failed', failure_reason = $2,
+       observed_fee = coalesce($3, observed_fee), updated_at = now()
+     where id = $1`,
+    [id, reason, observedFee ?? null],
   );
 }
 

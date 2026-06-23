@@ -42,7 +42,7 @@ export interface RevealJob {
 
 export type RevealResult =
   | { ok: true; txHash: string; observedFee: number }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; observedFee?: number };
 
 // Runs the full reveal for one job on one channel: sponsor a throwaway ephemeral (so the relayer's
 // wallet is never the reveal source), simulate to verify the proof and price the gas, restore any
@@ -68,8 +68,9 @@ export async function executeReveal(job: RevealJob, channel: Channel): Promise<R
   // The locked fee must cover the whole flow the relayer pays for: the reveal resource fee plus the
   // sponsor, merge, and fee-bump inclusion, not just the resource fee.
   const flowOverhead = BigInt(FEE_BUMP_REVEAL) + BigInt(FEE_BUMP_MERGE) + BigInt(FEE_SPONSOR);
+  const observedFee = Number(BigInt(sim.minResourceFee) + flowOverhead);
   if (BigInt(job.xlmFee) < BigInt(sim.minResourceFee) + flowOverhead) {
-    return { ok: false, reason: "fee_below_gas" };
+    return { ok: false, reason: "fee_below_gas", observedFee };
   }
 
   // Restore archived pool state first. It is master-sourced and needs no ephemeral, so a restore
@@ -85,7 +86,7 @@ export async function executeReveal(job: RevealJob, channel: Channel): Promise<R
   try {
     await sponsorEphemeral(channel.keypair, ephemeral);
     const txHash = await submitReveal(master, ephemeral, revealOp);
-    return { ok: true, txHash, observedFee: Number(sim.minResourceFee) };
+    return { ok: true, txHash, observedFee };
   } finally {
     // Recover the sponsored reserve and drop the record. On failure the record stays so the sweep
     // reclaims it later; the reserve is never permanently leaked.
