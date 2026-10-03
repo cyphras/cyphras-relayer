@@ -8,6 +8,12 @@ const schema = z
     STELLAR_RPC_URL: z.string().url(),
     STELLAR_HORIZON_URL: z.string().url(),
     STELLAR_NETWORK_PASSPHRASE: z.string().min(1),
+    // RPC resilience. A rate-limited (429) Soroban RPC call is retried with exponential backoff; with
+    // RPC_MIN_INTERVAL_MS > 0 request starts are spaced so a burst of indexer/keeper reads does not
+    // trip a shared public RPC's limit in the first place. Leave the interval at 0 for a dedicated RPC.
+    RPC_MAX_RETRIES: z.coerce.number().int().nonnegative().default(5),
+    RPC_RETRY_BASE_MS: z.coerce.number().int().positive().default(500),
+    RPC_MIN_INTERVAL_MS: z.coerce.number().int().nonnegative().default(0),
     RELAYER_SECRET: z.string().length(56),
     // Optional additional master secrets (comma-separated), each funding its own channels. Clients
     // pick which master receives the fee by binding its public key into the proof; the relayer

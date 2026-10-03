@@ -30,8 +30,19 @@ services:
       STELLAR_RPC_URL: https://mainnet.sorobanrpc.com
       STELLAR_HORIZON_URL: https://horizon.stellar.org
       STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+      # The .env RELAYER_SECRET/EXTRA are the testnet wallet; mainnet uses its own funded secrets, so
+      # override them here rather than inherit the testnet ones from env_file.
+      RELAYER_SECRET: ${MAINNET_RELAYER_SECRET:?set MAINNET_RELAYER_SECRET in .env}
+      RELAYER_EXTRA_SECRETS: ${MAINNET_RELAYER_EXTRA_SECRETS:-}
       FACTORY_ID: ${MAINNET_FACTORY_ID:?set MAINNET_FACTORY_ID in .env}
       INDEXER_START_LEDGER: ${MAINNET_INDEXER_START_LEDGER:-0}
+      # Mainnet reveal flow costs a near-constant ~341176 stroops (measured observed_fee), the value the
+      # fee_below_gas guard checks against. Floor just above it so even a cold-start quote clears the
+      # guard; the 30% margin + tier rounding then land the quote at 500000 (~46% over the guard).
+      REVEAL_FLOW_FEE_STROOPS: 350000
+      # The free public RPC rate-limits aggressively (Cloudflare 1015), so space RPC request starts to
+      # stay under its burst limit. Drop to 0 once a dedicated RPC replaces STELLAR_RPC_URL above.
+      RPC_MIN_INTERVAL_MS: 250
       DATABASE_URL: postgres://relayer:${POSTGRES_PASSWORD}@postgres-mainnet:5432/relayer_mainnet
     ports:
       # Separate port from testnet's 8080; nginx routes the mainnet header here.

@@ -11,7 +11,68 @@ import {
 import { config } from "../config/index.js";
 import { logger } from "../lib/logger.js";
 
-export const server = new rpc.Server(config.STELLAR_RPC_URL);
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// True for a shared-RPC rate-limit response (HTTP 429, including Cloudflare's "error 1015"), which is
+// transient and worth retrying rather than surfacing as a hard failure.
+function isRateLimited(err: unknown): boolean {
+  const e = err as { response?: { status?: number }; status?: number; message?: string };
+  if (e?.response?.status === 429 || e?.status === 429) {
+    return true;
+  }
+  return /\b429\b|too many requests|rate limit|error 1015/i.test(String(e?.message ?? ""));
+}
+
+// Spaces RPC request starts by RPC_MIN_INTERVAL_MS so a burst of indexer/keeper reads does not trip a
+// shared public RPC's rate limit. Left at 0 (a dedicated RPC), calls are not throttled.
+let rpcGate: Promise<unknown> = Promise.resolve();
+function throttleRpc(): Promise<void> {
+  if (config.RPC_MIN_INTERVAL_MS <= 0) {
+    return Promise.resolve();
+  }
+  const next = rpcGate.then(() => sleep(config.RPC_MIN_INTERVAL_MS));
+  rpcGate = next.catch(() => undefined);
+  return next;
+}
+
+// Retries a single RPC call on rate-limit responses with exponential backoff and jitter. Every RPC
+// method used here is an idempotent read (submission goes through Horizon), so a retry is always safe.
+async function withRpcResilience<T>(call: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    await throttleRpc();
+    try {
+      return await call();
+    } catch (err) {
+      if (!isRateLimited(err) || attempt >= config.RPC_MAX_RETRIES) {
+        throw err;
+      }
+      const backoff =
+        config.RPC_RETRY_BASE_MS * 2 ** attempt +
+        Math.floor(Math.random() * config.RPC_RETRY_BASE_MS);
+      logger.warn({ attempt: attempt + 1 }, "soroban rpc rate-limited, backing off");
+      await sleep(backoff);
+    }
+  }
+}
+
+const rawServer = new rpc.Server(config.STELLAR_RPC_URL);
+
+// One server backs every Soroban RPC call, so wrapping it makes rate-limit resilience apply everywhere:
+// each method call is throttled and retried on a 429. Methods bind to the raw server, so the SDK's own
+// internal calls bypass the wrapper and are not double-counted.
+export const server: rpc.Server = new Proxy(rawServer, {
+  get(target, prop, receiver) {
+    const value = Reflect.get(target, prop, receiver);
+    if (typeof value !== "function") {
+      return value;
+    }
+    const method = value as (...a: unknown[]) => unknown;
+    return (...args: unknown[]) =>
+      withRpcResilience(() => method.apply(target, args) as Promise<unknown>);
+  },
+});
 
 export const horizon = new Horizon.Server(config.STELLAR_HORIZON_URL);
 
