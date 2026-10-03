@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { db } from "../db/pool.js";
 import { estimateFee } from "../fee/estimate.js";
 import { channelPool } from "../channels/pool.js";
+import { config } from "../config/index.js";
 
 const MAX_LEAF_PAGE = 10000;
 const DEFAULT_LEAF_PAGE = 1000;
@@ -22,11 +23,12 @@ export async function infoRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/v1/info/pools", async () => {
-    const { rows } = await db.query(
+    const { rows } = await db.query<{ active: boolean }>(
       `select address, token, asset, denomination, generation, active
        from pools order by asset, denomination`,
     );
-    return { pools: rows };
+    // Only the advertised flag changes; the stored one keeps the pools indexed and keepered.
+    return { pools: config.DEPOSITS_CLOSED ? rows.map((r) => ({ ...r, active: false })) : rows };
   });
 
   app.get<{ Params: { pool: string }; Querystring: { from?: string; limit?: string } }>(
