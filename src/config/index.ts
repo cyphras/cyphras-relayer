@@ -68,6 +68,15 @@ const schema = z
     // url check; otherwise a blank ALERT_WEBHOOK_URL would fail validation and crash startup.
     ALERT_WEBHOOK_URL: z.preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
+    // Retires the pools for new sends: every pool is advertised inactive, so clients stop committing,
+    // while indexing, TTL upkeep and reveals continue for notes already in a pool.
+    DEPOSITS_CLOSED: z.preprocess(
+      (v) => (v === "" ? undefined : v),
+      z
+        .enum(["true", "false"])
+        .default("false")
+        .transform((v) => v === "true"),
+    ),
   })
   .refine((c) => c.CHANNEL_MIN_BALANCE_STROOPS < c.CHANNEL_FUND_STROOPS, {
     message:
