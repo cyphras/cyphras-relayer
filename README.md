@@ -1,5 +1,11 @@
 # cyphras-relayer
 
+> **Retired.** This relayer served the fixed-denomination private send of the Cyphras
+> extension up to 0.3.x. Cyphras 0.4.0 removed that send. Its pools were closed to new
+> deposits on 2026-10-06 and hold no funds, and the relayers were shut down on 2026-10-07.
+> Private payments v2 runs on the services in
+> [cyphras/cyphras-contracts](https://github.com/cyphras/cyphras-contracts/tree/dev/services).
+
 Relayer service for Cyphras private payments. It indexes commit events, serves commitment
 leaves so clients build their own Merkle path, submits reveal transactions through ephemeral
 accounts, and keeps contract state alive via TTL bumps. Cyphras runs a single relayer; the
